@@ -22,6 +22,7 @@ def get_args():
     parser.add_argument('-csv', type=str, help='csv dock scores input file')
     parser.add_argument('-sdf', type=str, help='sdf input file')
     parser.add_argument('-sdftop', type=str, help='small sdf input file')
+    parser.add_argument('-state', type=str, help='bottom or top 10k')
     args = parser.parse_args()
     return args
 
@@ -85,22 +86,35 @@ def save_pocket(pdb, sdf, name):
 # convert files into list of strings
 # for the protein pdb and ligand sdf 
 # (states are separated by $$$$)
-def stringify(sdf, pdb, num_states):
+def stringify(sdf, pdb, num_states, bottom):
     sdf_split = []
     with open(sdf,'r') as f:
         for key,group in itertools.groupby(f,lambda line: line.startswith('$$$$')):
           if not key:
             sdf_split.append("".join(list(group)))
-          if len(sdf_split) == num_states:
-            break
+    if bottom==True:
+        sdf_split=sdf_split[-1*num_states:]
+    else:
+        sdf_split=sdf_split[0:num_states]
     with open(pdb,'r') as f:
         pdb_string = f.readlines()
     return sdf_split, "".join(pdb_string)
 
+def find_end(lines):
+    filtered_lines=[]
+    for l in lines:
+        split = l.split(' ')
+        split = list(filter(lambda x: x != '', split))
+        vals1 = (split[0])
+        
+        # stop when we get to the integers in the sdf
+        if vals1.isdigit():
+            return filtered_lines
+        filtered_lines.append(l)
+            
 def create_pdb(sdf, pdb_string,i):
     lines = sdf.split('\n')
-    num_lines = (int)(lines[3].split(' ')[1])
-    lig = lines[4:4+num_lines-1]
+    lig = find_end(lines[4:])
     lig = list(filter(lambda x: 'H' not in x, lig))
     lig_pdb = list(map(create_line, lig, np.arange(1,len(lig)+1)))
     f =  open("tmp{0}.pdb".format(i), 'w+')
@@ -197,9 +211,10 @@ def run():
     args = get_args()
     maps=[]
 
-    num_residues = save_pocket(args.pdb, args.sdftop, os.path.splitext(args.pdb)[0]+".pock.pdb")
+    protein = os.path.splitext(args.pdb)[0]
+    num_residues = save_pocket(args.pdb, args.sdftop, protein +".pock.pdb")
     print("done creating pocket")
-    s, pdb = stringify(args.sdf, os.path.splitext(args.pdb)[0]+".pock.pdb", 10000)
+    s, pdb = stringify(args.sdf, protein+".pock.pdb", 10000, args.state=='bottom')
     pdb_string = [pdb for x in range(len(s))]
 
     with multiprocessing.Pool(32) as p:
@@ -211,9 +226,13 @@ def run():
             
     print("Finished generating matrices")
     images = np.stack(maps,axis=0)
-    scores = pd.read_csv(args.csv)["Chemgauss4"]
-    np.save(os.path.splitext(args.sdf)[0]+".matrices",images)
-    np.save(os.path.splitext(args.sdf)[0]+".scores", scores)
+    
+    # set the correct receptor
+    scores = pd.read_csv(args.csv)
+    scores["receptor"] = protein
+    
+    np.save(protein +"." + args.state+".matrices",images)
+    scores.to_csv(protein + ".scores")
 
 if __name__ == "__main__":
     run()   
