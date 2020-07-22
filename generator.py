@@ -14,7 +14,6 @@ warnings.filterwarnings('ignore')
 import pickle
 import pandas as pd
 import argparse
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -26,44 +25,31 @@ def get_args():
     args = parser.parse_args()
     return args
 
-dict_aa = {'CYS': 0, 'ASP': 1, 'SER': 2, 'GLN': 3, 'LYS': 4,
-     'ILE': 5, 'PRO': 6, 'THR': 7, 'PHE': 8, 'ASN': 9, 
-     'GLY': 10, 'HIS': 11, 'LEU': 12, 'ARG': 13, 'TRP': 14, 
-     'ALA': 15, 'VAL':16, 'GLU': 17, 'TYR': 18, 'MET': 19}
-
-dict_element = {"H": 20, "I":21,
-       "N": 22,
-       "P":23,
-       "C": 24,
-       "O":25,
-       "F": 26,
-       "S": 27,
-       "Li": 28,
-       "Cl": 29,
-       "Br": 30}
+# pymol documentation
 aa_hscale = {
-"ALA":  0.620,
-"ARG": -2.530,
-"ASN": -0.780,
-"ASP": -0.900,
-"CYS":  0.290,
-"GLN": -0.850,
-"GLU": -0.740,
-"GLY":  0.480,
-"HIS": -0.400,
-"ILE":  1.380,
-"LEU":  1.060,
-"LYS": -1.500,
-"MET":  0.640,
-"PHE":  1.190,
-"PRO":  0.120,
-"SER": -0.180,
-"THR": -0.050,
-"TRP":  0.810,
-"TYR":  0.260,
-"VAL":  1.080}
+            "ALA":  0.620,
+            "ARG": -2.530,
+            "ASN": -0.780,
+            "ASP": -0.900,
+            "CYS":  0.290,
+            "GLN": -0.850,
+            "GLU": -0.740,
+            "GLY":  0.480,
+            "HIS": -0.400,
+            "ILE":  1.380,
+            "LEU":  1.060,
+            "LYS": -1.500,
+            "MET":  0.640,
+            "PHE":  1.190,
+            "PRO":  0.120,
+            "SER": -0.180,
+            "THR": -0.050,
+            "TRP":  0.810,
+            "TYR":  0.260,
+            "VAL":  1.080}
 
-element_charge = {"H": +1, "I":-1,
+element_charge = {
+           "H": +1, "I":-1,
            "N": -3,
            "P":-3,
            "C": +4,
@@ -73,6 +59,19 @@ element_charge = {"H": +1, "I":-1,
            "Li": +1,
            "Cl": -1,
            "Br": -1}
+
+element_radius = {
+           "H": 1.20, "I": 1.98,
+           "N": 1.55 ,
+           "P":1.95,
+           "C": 1.70,
+           "O":1.52,
+           "F": 1.47,
+           "S":1.80,
+           "Li": 1.82,
+           "Cl": 1.75,
+           "Br": 1.85}
+
 def save_pocket(pdb, sdf, name):
     cmd.reinitialize()
     cmd.load(pdb)
@@ -168,21 +167,6 @@ def maker_w_strings(data):
     # compute constacts
     matrix, l = md.compute_contacts(t, contacts=pairs, scheme="closest-heavy")
     matrix = np.array(matrix).reshape((pl,pl))
-    
-    aa_matrix_h = np.zeros((pl, pl))
-    aa_matrix_v = np.zeros((pl, pl))
-    resi_list = list(t.topology.residues)
-    atom_list = list(t.topology.atoms)
-
-    for p in range(pl):
-        r = resi_list[p]
-        if not str(r).startswith('U'):
-            aa_matrix_v[:,p]=aa_hscale[r.name]
-            aa_matrix_h[p]=aa_hscale[r.name]
-        else:
-            a = atom_list[p]
-            aa_matrix_v[:,p] =element_charge[a.name]
-            aa_matrix_h[p]=element_charge[a.name]
             
     ### generate protein-ligand mask
     mask = np.zeros((pl,pl))
@@ -198,10 +182,8 @@ def maker_w_strings(data):
             
     p_img = cv2.resize(matrix, dsize=(64, 64), interpolation=cv2.INTER_CUBIC).reshape(64,64,1)
     m_img = cv2.resize(mask, dsize=(64, 64), interpolation=cv2.INTER_CUBIC).reshape(64,64,1)
-    v_img = cv2.resize(aa_matrix_v, dsize=(64, 64), interpolation=cv2.INTER_CUBIC).reshape(64,64,1)
-    h_img = cv2.resize(aa_matrix_h, dsize=(64, 64), interpolation=cv2.INTER_CUBIC).reshape(64,64,1)
 
-    p_contact_matrix = np.concatenate([p_img, m_img, v_img, h_img], axis=-1)
+    p_contact_matrix = np.concatenate([p_img, m_img], axis=-1)
     os.remove("tmp{0}.pdb".format(tmp_file))
     return p_contact_matrix
     
