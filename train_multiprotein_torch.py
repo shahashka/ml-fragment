@@ -56,17 +56,6 @@ class ContactDataset(torch.utils.data.Dataset):
 
 # load data
 def load_data():
-#     data_images =[]
-#     data_scores = []
-#     # look for all the protein matrix and score files
-#     files_m = glob.glob('./**/*.high.matrices.npy', recursive=True)
-#     files_s = glob.glob('./**/*.scores', recursive=True)
-#     for m,s in zip(files_m, files_s):
-#         print(m,s)
-#         data_images.append(np.load(m)[0:5000])
-#         data_scores.append(pd.read_csv(s).iloc[0:5000])
-#     x = np.vstack(data_images)[:,:,:,0:2]
-#     y = pd.concat(data_scores)['Chemgauss4'].values
     with open('dset.pkl', 'rb') as pickle_file:
         x,y = pickle.load(pickle_file)
     scaler = MinMaxScaler()
@@ -74,10 +63,10 @@ def load_data():
     x = torch.FloatTensor(x)
     x = np.transpose(x,(0,3,1,2))
     y = torch.FloatTensor(y)
-    return x, y
+    return x, y, scaler
 
 # main
-x,y = load_data()
+x,y,scaler  = load_data()
 
 x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.2, shuffle=True)
 train_dataset = ContactDataset(x_train,y_train)
@@ -157,27 +146,35 @@ for e in range(num_epochs):
             y_pred_values.append(y_pred)
             y_test_values.append(local_labels.cpu())
             
-        y_pred_values = [item for sublist in y_pred_values for item in sublist]    
-        y_test_values = [item for sublist in y_test_values for item in sublist]    
+    y_pred_values = [item for sublist in y_pred_values for item in sublist]    
+    y_test_values = [item for sublist in y_test_values for item in sublist]    
 
-        r2_epoch = r2_score(y_test_values, y_pred_values)  
-        loss_test_store.append(loss_acc/iters)
-        r2_test_store.append(r2_epoch)
+    r2_epoch = r2_score(y_test_values, y_pred_values)  
+    loss_test_store.append(loss_acc/iters)
+    r2_test_store.append(r2_epoch)
         
         
     print(e, loss_train_store[-1], loss_test_store[-1], r2_train_store[-1], r2_test_store[-1])
     
-fig ,(ax1,ax2) = plt.subplots(2)
+fig ,(ax1,ax2,ax3) = plt.subplots(3, figsize=(5,7))
 ax1.plot(loss_train_store,label="train loss")
 ax1.plot(loss_test_store, label="test loss")
 ax1.set_xlabel("Epochs")
 ax1.set_ylabel("MSE")
+ax1.legend()
 
 ax2.plot(r2_train_store,label="train R2")
 ax2.plot(r2_test_store, label="test R2")
 ax2.set_xlabel("Epochs")
 ax2.set_ylabel("R2")
+ax2.legend()
 
+test = scaler.inverse_transform(np.array(y_test_values).reshape(-1,1))
+pred = scaler.inverse_transform(np.array(y_pred_values).reshape(-1,1))
+
+ax3.hist(test, label="test", alpha=0.5)
+ax3.hist(pred, label="pred", alpha=0.5)
+ax3.legend()
 
 plt.savefig("metrics.torch.png")
 

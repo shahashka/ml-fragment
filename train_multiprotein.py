@@ -13,7 +13,7 @@ from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error, r2_score, precision_score, auc, recall_score, roc_curve
 from regression_enrichment_surface import regression_enrichment_surface as rds
 
-strategy = tf.distribute.MirroredStrategy(devices=["/gpu:0"])
+strategy = tf.distribute.MirroredStrategy(devices=["/gpu:0", "/gpu:1"])
 print ('Number of devices: {}'.format(strategy.num_replicas_in_sync))
 
 def r2_keras(y_true, y_pred):
@@ -23,43 +23,34 @@ def r2_keras(y_true, y_pred):
     return ( 1 - SS_res/(SS_tot + K.epsilon()) )
 
 def load_data():
-    data_images =[]
-    data_scores = []
-    # look for all the protein matrix and score files
-    files_m = glob.glob('./**/*.high.matrices.npy', recursive=True)
-    files_s = glob.glob('./**/*.scores', recursive=True)
-    for m,s in zip(files_m, files_s):
-        print(m,s)
-        data_images.append(np.load(m)[0:5000])
-        data_scores.append(pd.read_csv(s).iloc[0:5000])
-    X = np.vstack(data_images)
-    y = pd.concat(data_scores)
+    with open('dset.pkl', 'rb') as pickle_file:
+        x,y = pickle.load(pickle_file)
     return X, y
 
 
 def create_small_model(shape):
-    #with strategy.scope():
-    dr = 0.1
-    model = Sequential()
-    model.add(Conv2D(8, kernel_size=(6, 6),
-                     activation='relu',
-                     input_shape=shape))
-    model.add(Conv2D(32, (3, 3), activation='relu'))
-    model.add(Conv2D(32, (3, 3), activation='relu'))
-    model.add(MaxPooling2D(pool_size=(2,2)))
-    model.add(Dropout(dr))
-    model.add(Flatten())
-#     model.add(Dense(128, activation='relu'))
-#     model.add(Dense(64, activation='relu'))
-#     model.add(Dropout(dr))
-    model.add(Dense(64, activation='relu'))
-    model.add(Dropout(dr))
-    model.add(Dense(1))
+    with strategy.scope():
+        dr = 0.1
+        model = Sequential()
+        model.add(Conv2D(8, kernel_size=(6, 6),
+                         activation='relu',
+                         input_shape=shape))
+        model.add(Conv2D(32, (3, 3), activation='relu'))
+        model.add(Conv2D(32, (3, 3), activation='relu'))
+        model.add(MaxPooling2D(pool_size=(2,2)))
+        model.add(Dropout(dr))
+        model.add(Flatten())
+    #     model.add(Dense(128, activation='relu'))
+    #     model.add(Dense(64, activation='relu'))
+    #     model.add(Dropout(dr))
+        model.add(Dense(64, activation='relu'))
+        model.add(Dropout(dr))
+        model.add(Dense(1))
 
-    model.compile(loss=tf.keras.losses.mean_squared_error,
-                  optimizer=tf.keras.optimizers.Adam(lr=1e-5),
-                  metrics=['mean_squared_error', r2_keras])
-    print(model.summary())
+        model.compile(loss=tf.keras.losses.mean_squared_error,
+                      optimizer=tf.keras.optimizers.Adam(lr=1e-5),
+                      metrics=['mean_squared_error', r2_keras])
+        print(model.summary())
     return model
 
 
