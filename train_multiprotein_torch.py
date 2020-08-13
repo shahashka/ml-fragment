@@ -12,9 +12,6 @@ import glob
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
-# TODO
-# r2 metric
-
 # create nn module for ConvNet model
 class ContactModel(nn.Module):
     def __init__(self,dr=0.1):
@@ -59,22 +56,23 @@ class ContactDataset(torch.utils.data.Dataset):
 
 # load data
 def load_data():
-    data_images =[]
-    data_scores = []
-    # look for all the protein matrix and score files
-    files_m = glob.glob('./**/*.high.matrices.npy', recursive=True)
-    files_s = glob.glob('./**/*.scores', recursive=True)
-    for m,s in zip(files_m, files_s):
-        print(m,s)
-        data_images.append(np.load(m)[0:5000])
-        data_scores.append(pd.read_csv(s).iloc[0:5000])
-    x = np.vstack(data_images)[:,:,:,0:2]
-    y = pd.concat(data_scores)['Chemgauss4'].values
+#     data_images =[]
+#     data_scores = []
+#     # look for all the protein matrix and score files
+#     files_m = glob.glob('./**/*.high.matrices.npy', recursive=True)
+#     files_s = glob.glob('./**/*.scores', recursive=True)
+#     for m,s in zip(files_m, files_s):
+#         print(m,s)
+#         data_images.append(np.load(m)[0:5000])
+#         data_scores.append(pd.read_csv(s).iloc[0:5000])
+#     x = np.vstack(data_images)[:,:,:,0:2]
+#     y = pd.concat(data_scores)['Chemgauss4'].values
+    with open('dset.pkl', 'rb') as pickle_file:
+        x,y = pickle.load(pickle_file)
     scaler = MinMaxScaler()
     y = scaler.fit_transform(y.reshape(-1,1))
-    x = x
-    x = torch.FloatTensor(x).view(x.shape[0],2,64,64)
-    print(x.shape)
+    x = torch.FloatTensor(x)
+    x = np.transpose(x,(0,3,1,2))
     y = torch.FloatTensor(y)
     return x, y
 
@@ -95,7 +93,7 @@ model = ContactModel()
 
 # create loss function and optimizer
 opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
-criterion = nn.MSELoss(reduction='sum')
+criterion = nn.MSELoss()
 
 # epoch loop
 num_epochs=50
@@ -110,6 +108,7 @@ for e in range(num_epochs):
     loss_acc=0
     iters=0
     y_pred_values=[]
+    y_test_values=[]
     gen_train = tqdm(enumerate(train_dataloader), total=int(len(train_dataloader.dataset) / train_dataloader.batch_size),
                        desc='training')
     for g in gen_train:
@@ -129,9 +128,12 @@ for e in range(num_epochs):
         loss_acc+=loss_train.item()
         iters+=1
         y_pred_values.append(y_pred)
+        y_test_values.append(local_labels.cpu())
         
-    y_pred_values = [item for sublist in y_pred_values for item in sublist]    
-    r2_epoch = r2_score(y_pred_values, y_train)
+    y_pred_values = [item for sublist in y_pred_values for item in sublist]   
+    y_test_values = [item for sublist in y_test_values for item in sublist]    
+
+    r2_epoch = r2_score(y_test_values, y_pred_values)
     loss_train_store.append(loss_acc/iters)
     r2_train_store.append(r2_epoch)
     
@@ -141,6 +143,7 @@ for e in range(num_epochs):
     loss_acc=0
     iters=0
     y_pred_values=[]
+    y_test_values=[]
     with torch.no_grad():
         for g in gen_test:
             i, (local_batch, local_labels) = g
@@ -152,9 +155,12 @@ for e in range(num_epochs):
             loss_acc+=loss_test.item()
             iters+=1
             y_pred_values.append(y_pred)
+            y_test_values.append(local_labels.cpu())
             
         y_pred_values = [item for sublist in y_pred_values for item in sublist]    
-        r2_epoch = r2_score(y_pred_values, y_val)  
+        y_test_values = [item for sublist in y_test_values for item in sublist]    
+
+        r2_epoch = r2_score(y_test_values, y_pred_values)  
         loss_test_store.append(loss_acc/iters)
         r2_test_store.append(r2_epoch)
         
