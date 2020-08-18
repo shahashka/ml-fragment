@@ -12,9 +12,33 @@ import glob
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import argparse
-import torch.distributed as dist
 import torch.multiprocessing as mp
 
+import torch.distributed as dist
+from apex.parallel import DistributedDataParallel as DDP
+from apex import amp
+class ConvNet(nn.Module):
+    def __init__(self, num_classes=10):
+        super(ConvNet, self).__init__()
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.fc = nn.Linear(7*7*32, num_classes)
+
+    def forward(self, x):
+        out = self.layer1(x)
+        out = self.layer2(out)
+        out = out.reshape(out.size(0), -1)
+        out = self.fc(out)
+        return out
+    
 # create nn module for ConvNet model
 class ContactModel(nn.Module):
     def __init__(self,dr=0.1):
@@ -34,11 +58,12 @@ class ContactModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(dr),
             nn.Linear(64,1))
+        
     def forward(self,x):
-        x = self.cnn(x)
-        x = x.view(x.size(0), -1) # where x.size(0) is the batch size
-        x = self.linear(x)
-        return x
+        out = self.cnn(x)
+        out = out.reshape(out.size(0), -1) # where x.size(0) is the batch size
+        out = self.linear(out)
+        return out
 
 class ContactDataset(torch.utils.data.Dataset):
     def __init__(self, images, dock_score):
@@ -81,23 +106,33 @@ def train(gpu, args):
     	world_size=args.world_size,                              
     	rank=rank                                               
     )                                                          
+    print("init processes")
+
     ############################################################
     x,y,scaler  = load_data()
 
     x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.2, shuffle=True)
     train_dataset = ContactDataset(x_train,y_train)
     test_dataset = ContactDataset(x_val,y_val)
-    
-    ###############################################################
-    # Wrap the model
+    print("loaded data")
+    ############################################################### 
+    torch.manual_seed(0)
     model = ContactModel()
     torch.cuda.set_device(gpu)
     model.cuda(gpu)
-    model = nn.parallel.DistributedDataParallel(model,
-                                                device_ids=[gpu])
+    
+    # create loss function and optimizer
+    criterion = nn.MSELoss().cuda(gpu)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
+    model, opt = amp.initialize(model, opt, opt_level='O2')
+    print("apex init")
+    print(model)
+    
+    model = DDP(model) #torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    print("Model created")
     ###############################################################
     
-     ################################################################
+    ################################################################
     train_sampler = torch.utils.data.distributed.DistributedSampler(
     	train_dataset,
     	num_replicas=args.world_size,
@@ -108,15 +143,13 @@ def train(gpu, args):
     	num_replicas=args.world_size,
     	rank=rank
     )
+    
     ################################################################
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=64, num_workers=0, shuffle=False,
                                                    sampler=train_sampler)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=64, num_workers=0, shuffle=False,
                                                   sampler=test_sampler)
     
-    # create loss function and optimizer
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
-    criterion = nn.MSELoss().cuda(gpu)
 
     # epoch loop
     num_epochs=50
@@ -147,7 +180,8 @@ def train(gpu, args):
 
             #backprop + update
             opt.zero_grad()
-            loss_train.backward()
+            with amp.scale_loss(loss_train, opt) as scaled_loss:
+                scaled_loss.backward()
             opt.step()
 
             if gpu ==0:   
@@ -172,6 +206,7 @@ def train(gpu, args):
         iters=0
         y_pred_values=[]
         y_test_values=[]
+        model.eval()
         with torch.no_grad():
             for g in gen_test:
                 i, (local_batch, local_labels) = g
@@ -184,8 +219,8 @@ def train(gpu, args):
                 if gpu==0:
                     loss_acc+=loss_test.item()
                     iters+=1
-                    #y_pred_values.append(y_pred)
-                    #y_test_values.append(local_labels.cpu())
+#                     y_pred_values.append(y_pred)
+#                     y_test_values.append(local_labels.cpu())
 
         if gpu==0:
             #y_pred_values = [item for sublist in y_pred_values for item in sublist]    
@@ -198,28 +233,29 @@ def train(gpu, args):
 
             print(e, loss_train_store[-1], loss_test_store[-1]) #, r2_train_store[-1], r2_test_store[-1])
 
-    if gpu==0:
-        fig ,(ax1,ax2,ax3) = plt.subplots(3, figsize=(5,7))
-        ax1.plot(loss_train_store,label="train loss")
-        ax1.plot(loss_test_store, label="test loss")
-        ax1.set_xlabel("Epochs")
-        ax1.set_ylabel("MSE")
-        ax1.legend()
+    # now evaluate
+#     if gpu==0:
+#         fig ,(ax1,ax2,ax3) = plt.subplots(3, figsize=(5,7))
+#         ax1.plot(loss_train_store,label="train loss")
+#         ax1.plot(loss_test_store, label="test loss")
+#         ax1.set_xlabel("Epochs")
+#         ax1.set_ylabel("MSE")
+#         ax1.legend()
 
-        ax2.plot(r2_train_store,label="train R2")
-        ax2.plot(r2_test_store, label="test R2")
-        ax2.set_xlabel("Epochs")
-        ax2.set_ylabel("R2")
-        ax2.legend()
+#         ax2.plot(r2_train_store,label="train R2")
+#         ax2.plot(r2_test_store, label="test R2")
+#         ax2.set_xlabel("Epochs")
+#         ax2.set_ylabel("R2")
+#         ax2.legend()
 
-        test = scaler.inverse_transform(np.array(y_test_values).reshape(-1,1))
-        pred = scaler.inverse_transform(np.array(y_pred_values).reshape(-1,1))
+#         test = scaler.inverse_transform(np.array(y_test_values).reshape(-1,1))
+#         pred = scaler.inverse_transform(np.array(y_pred_values).reshape(-1,1))
 
-        ax3.hist(test, label="test", alpha=0.5)
-        ax3.hist(pred, label="pred", alpha=0.5)
-        ax3.legend()
+#         ax3.hist(test, label="test", alpha=0.5)
+#         ax3.hist(pred, label="pred", alpha=0.5)
+#         ax3.legend()
 
-        plt.savefig("metrics.torch.png")
+#         plt.savefig("metrics.torch.png")
 
 # def average_gradients(model):
 #     size = float(dist.get_world_size())
@@ -241,7 +277,7 @@ def main():
     args = parser.parse_args()
     #########################################################
     args.world_size = args.gpus * args.nodes                #
-    os.environ['MASTER_ADDR'] = '140.221.10.78'              #
+    os.environ['MASTER_ADDR'] = 'localhost'                 #
     os.environ['MASTER_PORT'] = '8899'                      #
     mp.spawn(train, nprocs=args.gpus, args=(args,))         #
     #########################################################
