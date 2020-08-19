@@ -96,8 +96,102 @@ def load_data():
 # Distributed training
 # https://yangkky.github.io/2019/07/08/distributed-pytorch-tutorial.html
 # TODO allreduce for r^2, (for loss this is handled internally by pytorch)
-def train(gpu, args):
-    ############################################################
+def train(gpu, epoch, train_dataloader, model, dist, amp, opt, criterion):
+    device = next(model.parameters()).device
+    gen_train = tqdm(enumerate(train_dataloader), total=int(len(train_dataloader.dataset) / 
+                                                            (dist.get_world_size()*train_dataloader.batch_size)),
+                       desc='training')
+    loss_acc=0
+    iters=0
+    model.train()
+    for g in gen_train:
+        i, (local_batch, local_labels) = g
+        # Transfer to GPU
+        local_batch, local_labels = local_batch.to(device), local_labels.to(device)
+
+        #forward pass
+        y_pred = model(local_batch)
+        loss_train = criterion(y_pred.flatten(),local_labels.flatten())
+
+        #backprop + update
+        opt.zero_grad()
+        with amp.scale_loss(loss_train, opt) as scaled_loss:
+            scaled_loss.backward()
+        opt.step()
+
+        # log for rank=0
+        if gpu ==0:   
+            loss_acc+=loss_train.item()
+        iters+=1
+
+    return loss_acc/iters
+        
+def test(gpu, epoch, test_dataloader, model, dist, criterion):
+    device = next(model.parameters()).device
+    gen_test = tqdm(enumerate(test_dataloader), total=int(len(test_dataloader.dataset) / 
+                                                           (dist.get_world_size()*test_dataloader.batch_size)),
+                   desc='testing')
+    # Testing
+    iters=0
+    loss_acc=0
+    model.eval()
+    y_pred_arr = []
+    y_test_arr= []
+    with torch.no_grad():
+        for g in gen_test:
+            i, (local_batch, local_labels) = g
+            # Transfer to GPU
+            local_batch, local_labels = local_batch.to(device), local_labels.to(device)
+         
+            y_pred = model(local_batch)
+            loss_test = criterion(y_pred.flatten(),local_labels.flatten())
+            
+            y_pred_arr.append(y_pred)
+            y_test_arr.append(local_labels)
+
+            if gpu==0:
+                loss_acc+=loss_test.item()
+            iters+=1
+
+    y_pred_arr = [item for sublist in y_pred_arr for item in sublist]    
+    y_test_arr = [item for sublist in y_test_arr for item in sublist]    
+    y_pred_arr = torch.FloatTensor(y_pred_arr).to(device)
+    y_test_arr = torch.FloatTensor(y_test_arr).to(device)
+
+    r2 = calc_r2(gpu, dist, y_test_arr, y_pred_arr)
+    
+    return loss_acc/iters, r2    
+
+#https://github.com/pytorch/pytorch/issues/14536
+def calc_r2(gpu, dist, y_true, y_pred):
+    # TODO all_gather->gather for rank=0
+    gather_true = [torch.ones_like(y_true) for _ in range(dist.get_world_size())]
+    gather_pred = [torch.ones_like(y_pred)  for _ in range(dist.get_world_size())]
+    dist.all_gather(gather_true, y_true)
+    dist.all_gather(gather_pred, y_pred)
+    
+    y_pred_arr = [item for sublist in gather_pred for item in sublist]    
+    y_test_arr = [item for sublist in gather_true for item in sublist]    
+    return r2_score(y_test_arr, y_pred_arr)
+    
+def plot(train_loss, test_loss, test_r2):
+    fig ,(ax1,ax2) = plt.subplots(2, figsize=(5,7))
+    ax1.plot(train_loss,label="train loss")
+    ax1.plot(test_loss, label="test loss")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("MSE")
+    ax1.legend()
+
+    ax2.plot(test_r2,label="test R2")
+    ax2.set_xlabel("Epochs")
+    ax2.set_ylabel("R2")
+    ax2.legend()
+
+    plt.savefig("metrics.png")
+    
+def run(gpu, args):
+    
+    # set up processes
     rank = args.nr * args.gpus + gpu
     print(rank)
     dist.init_process_group(                                   
@@ -108,14 +202,15 @@ def train(gpu, args):
     )                                                          
     print("init processes")
 
-    ############################################################
+    # load data
     x,y,scaler  = load_data()
 
     x_train, x_val, y_train, y_val = train_test_split(x,y,test_size=0.2, shuffle=True)
     train_dataset = ContactDataset(x_train,y_train)
     test_dataset = ContactDataset(x_val,y_val)
     print("loaded data")
-    ############################################################### 
+
+    # create model
     torch.manual_seed(0)
     model = ContactModel()
     torch.cuda.set_device(gpu)
@@ -126,13 +221,11 @@ def train(gpu, args):
     opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
     model, opt = amp.initialize(model, opt, opt_level='O2')
     print("apex init")
-    print(model)
     
     model = DDP(model) #torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
     print("Model created")
-    ###############################################################
-    
-    ################################################################
+
+    # distributed data loading
     train_sampler = torch.utils.data.distributed.DistributedSampler(
     	train_dataset,
     	num_replicas=args.world_size,
@@ -144,125 +237,33 @@ def train(gpu, args):
     	rank=rank
     )
     
-    ################################################################
     train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=64, num_workers=0, shuffle=False,
                                                    sampler=train_sampler)
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=64, num_workers=0, shuffle=False,
                                                   sampler=test_sampler)
     
-
-    # epoch loop
-    num_epochs=50
-    loss_train_store=[]
-    loss_test_store=[]
-    r2_train_store=[]
-    r2_test_store=[]
-    device = next(model.parameters()).device
-
-    for e in range(num_epochs):
-        model.train()
-        # Training
-        loss_acc=0
-        iters=0
-        y_pred_values=[]
-        y_test_values=[]
-        gen_train = tqdm(enumerate(train_dataloader), total=int(len(train_dataloader.dataset) / 
-                                                                (dist.get_world_size()*train_dataloader.batch_size)),
-                           desc='training')
-        for g in gen_train:
-            i, (local_batch, local_labels) = g
-            # Transfer to GPU
-            local_batch, local_labels = local_batch.to(device), local_labels.to(device)
-
-            #train
-            y_pred = model(local_batch)
-            loss_train = criterion(y_pred.flatten(),local_labels.flatten())
-
-            #backprop + update
-            opt.zero_grad()
-            with amp.scale_loss(loss_train, opt) as scaled_loss:
-                scaled_loss.backward()
-            opt.step()
-
-            if gpu ==0:   
-                loss_acc+=loss_train.item()
-                iters+=1
-                #y_pred_values.append(y_pred)
-                #y_test_values.append(local_labels.cpu())
-
+    # train loop
+    plot_train = []
+    plot_test = []
+    plot_r2=[]
+    for epoch in range(args.epochs):
+        train_loss = train(gpu, epoch, train_dataloader, model, dist, amp, opt, criterion)
+        test_loss, test_r2 = test(gpu, epoch, test_dataloader, model, dist, criterion)
+        plot_train.append(train_loss)
+        plot_test.append(test_loss)
+        plot_r2.append(test_r2)
         if gpu==0:
-            #y_pred_values = [item for sublist in y_pred_values for item in sublist]   
-            #y_test_values = [item for sublist in y_test_values for item in sublist]    
+            print("Epoch {0} train loss {1}, test loss {2}, test r2 {3}".format(epoch, train_loss, test_loss,test_r2))
 
-            #r2_epoch = r2_score(y_test_values, y_pred_values)
-            loss_train_store.append(loss_acc/iters)
-            #r2_train_store.append(r2_epoch)
-
-        gen_test = tqdm(enumerate(test_dataloader), total=int(len(test_dataloader.dataset) / 
-                                                               (dist.get_world_size()*test_dataloader.batch_size)),
-                       desc='testing')
-        # Testing
-        loss_acc=0
-        iters=0
-        y_pred_values=[]
-        y_test_values=[]
-        model.eval()
-        with torch.no_grad():
-            for g in gen_test:
-                i, (local_batch, local_labels) = g
-                # Transfer to GPU
-                local_batch, local_labels = local_batch.to(device), local_labels.to(device)
-                #train
-                y_pred = model(local_batch)
-                loss_test = criterion(y_pred.flatten(),local_labels.flatten())
-                
-                if gpu==0:
-                    loss_acc+=loss_test.item()
-                    iters+=1
-#                     y_pred_values.append(y_pred)
-#                     y_test_values.append(local_labels.cpu())
-
-        if gpu==0:
-            #y_pred_values = [item for sublist in y_pred_values for item in sublist]    
-            #y_test_values = [item for sublist in y_test_values for item in sublist]    
-
-            #r2_epoch = r2_score(y_test_values, y_pred_values)  
-            loss_test_store.append(loss_acc/iters)
-            #r2_test_store.append(r2_epoch)
-
-
-            print(e, loss_train_store[-1], loss_test_store[-1]) #, r2_train_store[-1], r2_test_store[-1])
-
-    # now evaluate
-#     if gpu==0:
-#         fig ,(ax1,ax2,ax3) = plt.subplots(3, figsize=(5,7))
-#         ax1.plot(loss_train_store,label="train loss")
-#         ax1.plot(loss_test_store, label="test loss")
-#         ax1.set_xlabel("Epochs")
-#         ax1.set_ylabel("MSE")
-#         ax1.legend()
-
-#         ax2.plot(r2_train_store,label="train R2")
-#         ax2.plot(r2_test_store, label="test R2")
-#         ax2.set_xlabel("Epochs")
-#         ax2.set_ylabel("R2")
-#         ax2.legend()
-
-#         test = scaler.inverse_transform(np.array(y_test_values).reshape(-1,1))
-#         pred = scaler.inverse_transform(np.array(y_pred_values).reshape(-1,1))
-
-#         ax3.hist(test, label="test", alpha=0.5)
-#         ax3.hist(pred, label="pred", alpha=0.5)
-#         ax3.legend()
-
-#         plt.savefig("metrics.torch.png")
-
-# def average_gradients(model):
-#     size = float(dist.get_world_size())
-#     for param in model.parameters():
-#         dist.all_reduce(param.grad.data, op=dist.reduce_op.SUM)
-#         param.grad.data /= size
-        
+    if gpu == 0:
+        plot(plot_train, plot_test, plot_r2)
+        state = model.state_dict()
+        torch.save({'model_state': state,
+                    'opt_state': opt.state_dict(),
+                    'args': args,
+                    'amp': amp.state_dict()}, "model.pt")
+    
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-n', '--nodes', default=1,
@@ -279,9 +280,8 @@ def main():
     args.world_size = args.gpus * args.nodes                #
     os.environ['MASTER_ADDR'] = 'localhost'                 #
     os.environ['MASTER_PORT'] = '8899'                      #
-    mp.spawn(train, nprocs=args.gpus, args=(args,))         #
+    mp.spawn(run, nprocs=args.gpus, args=(args,))         #
     #########################################################
-    
     
 if __name__ == '__main__':
     main()
