@@ -4,7 +4,7 @@ import pandas as pd
 import pickle
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
+from apex import amp
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
@@ -83,14 +83,15 @@ model = ContactModel()
 # create loss function and optimizer
 opt = torch.optim.AdamW(model.parameters(), lr=1e-5)
 criterion = nn.MSELoss()
+model.to(device)
 
+model, opt = amp.initialize(model, opt, opt_level='O2')
 # epoch loop
 num_epochs=50
 loss_train_store=[]
 loss_test_store=[]
 r2_train_store=[]
 r2_test_store=[]
-model.to(device)
 for e in range(num_epochs):
     model.train()
     # Training
@@ -111,7 +112,8 @@ for e in range(num_epochs):
         
         #backprop + update
         opt.zero_grad()
-        loss_train.backward()
+        with amp.scale_loss(loss_train, opt) as scaled_loss:
+            scaled_loss.backward()
         opt.step()
         
         loss_acc+=loss_train.item()
